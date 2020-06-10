@@ -1,4 +1,4 @@
-# Classification-Models
+# Classification-Models : German Credit Data
 ## Data
 The German Credit Scoring Data consists of information about 1000 individuals. The first 20 variables are a mix of categorical and numerical variables, and act as independent variables for this data. The 21st column is a binary variable which indicates whether the customer defaults or not - this is the resultant variable. Value 1 of this variable indicates that the customer is likely to default on a credit payment.
 ## Goal and background
