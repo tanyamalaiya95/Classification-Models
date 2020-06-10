@@ -1,0 +1,495 @@
+---
+title: "Individual Case 2"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Data
+The _German Credit Scoring Data_ consists of information about 1000 individuals. The first 20 variables are a mix of categorical and numerical variables, and act as independent variables for this data. The 21st column is a binary variable which indicates whether the customer defaults or not - this is the resultant variable. Value 1 of this variable indicates that the customer is likely to default on a credit payment.
+
+## Goal and background
+The objective of this analysis is to build a classification model with the best predictive power. We do so by fitting different predictive models onto the training and testing subsets of the dataset and evaluating the in-sample and out-of-sample performance of each model. The following models' performances are compared: 
+
+- General Linear Model
+- Tree model - CART
+- Advanced Tree Models - Random Forest, Boosting
+- Generalized Additive Model
+- Neural Network
+
+The optimum probability or pcut in this case is given to us as 1/6 (equivalent to 5:1 asymmetric cost).
+
+## Approach: 
+
+We begin the analysis by an initial exploratory data analysis to get a preliminary understanding of the relationships among the different variables. The data is then split into 70% training data set and 30% testing data set (seed is set to 13480226 to facilitate reproducibility).
+
+# Exploratory Data Analysis
+```{r german data, echo = F, message=F, warning=F}
+#Load data
+require(rms)
+require(rpart)
+require(rpart.plot)
+require(ipred)
+require(randomForest)
+require(gbm)
+require(corrplot)
+require(dplyr)
+require(ggplot2)
+require(mgcv)
+require(neuralnet)
+require(glmnet)
+require(ROCR)
+require(nnet)
+
+german_credit = read.table("http://archive.ics.uci.edu/ml/machine-learning-databases/statlog/german/german.data")
+
+#Rename columns
+colnames(german_credit)=c("chk_acct","duration","credit_his","purpose","amount","saving_acct","present_emp","installment_rate","sex","other_debtor","present_resid","property","age","other_install","housing","n_credits","job","n_people","telephone","foreign","response")
+
+#recode response variable as 1 = default, 0 = no-default
+german_credit$response = german_credit$response-1
+
+#EDA
+str(german_credit)
+
+#Sampling
+set.seed(13480226)
+index <- sample(nrow(german_credit), 0.7*nrow(german_credit))
+german.train <- german_credit[index,]
+german.test <- german_credit[-index,]
+```
+
+# Logistic Regression
+We fit a full GLM model to the training data set and assess the AIC and BIC fit criteria. The ROC Curve and AUC and observed, and optimal cut-off probability is obtained using grid search method to calculate the misclassification rates. The out-of-sample performance parameters are obtained by using the fitted model for predicting testing data response values.
+```{r, echo=F, message=F}
+#Full model
+german.train.full<- glm(response~., family = binomial, data = german.train)
+#summary(german.train.full)
+
+paste("Full GLM: AIC = ", round(AIC(german.train.full),2))
+paste("Full GLM: BIC = ", round(BIC(german.train.full),2))
+
+#In-sample Prediction
+pred.german.train<- predict(german.train.full, type="response", newdata = german.train)
+#ROC Curve
+pred.train <- prediction(pred.german.train, german.train$response)
+perf.train <- performance(pred.train, "tpr", "fpr")
+#AUC
+train.auc = unlist(slot(performance(pred.train, "auc"), "y.values"))
+
+#Out-of-sample Prediction
+pred.german.test<- predict(german.train.full, type="response", newdata = german.test)
+#ROC Curve
+pred.test <- prediction(pred.german.test, german.test$response)
+perf.test <- performance(pred.test, "tpr", "fpr")
+#AUC
+test.auc = unlist(slot(performance(pred.test, "auc"), "y.values"))
+
+par(mfrow=c(1,2))
+plot(perf.train, colorize=TRUE, main = paste("In-sample ROC Curve: AUC = ",round(train.auc,2)))
+plot(perf.test, colorize=TRUE, main = paste("Out-of-sample ROC Curve: AUC = ",round(test.auc,2)))
+```
+
+To determine optimal cut off probability, the given cost parameters are used. A custom cost function is designed to indicate the trade off between the risk of giving loan to someone who cannot pay (predict 0, truth 1), and risk of rejecting someone who qualifies (predict 1, truth 0).
+```{r, echo=F, message=F, warning=F}
+#Defining cost function with given parameters
+costfunc = function(obs, pred.p, pcut){
+	weight1 = 5  
+	weight0 = 1  
+	c1 = (obs==1)&(pred.p<pcut)    # FN: actual=1 but pred=0
+	c0 = (obs==0)&(pred.p>=pcut)   # FP: actual=0 but pred=1
+	cost = mean(weight1*c1 + weight0*c0)  # Misclasification
+	return(cost)
+}
+
+p.seq = seq(0.01, 1, 0.01) 
+cost = rep(0, length(p.seq))  
+for(i in 1:length(p.seq)){ 
+	cost[i] = costfunc(obs = german.train$response, pred.p = pred.german.train, pcut = p.seq[i])  
+}
+
+#Optimal cut of probability
+optimal.pcut = p.seq[which(cost==min(cost))]
+paste("Optimal cut-off probability: ",optimal.pcut)
+plot(p.seq, cost)
+```
+
+Finally, we calculate the in-sample and out-of-sample MR and costs based on the optimal cut-off probability and given cost parameters.
+
+### In-Sample Parameters
+```{r, echo=F, warning=F}
+#In-Sample
+#Obtaining binary output using cut-off probability
+class.german.train.opt <- (pred.german.train>optimal.pcut)*1
+
+#Confusion matrix
+table(german.train$response, class.german.train.opt, dnn = c("True", "Predicted")) 
+MR.train <- mean(german.train$response!= class.german.train.opt)
+cost.train <- costfunc(obs = german.train$response, pred.p = pred.german.train, pcut = optimal.pcut)
+
+paste("In-sample misclassification rate: ",round(MR.train,2))
+paste("In-sample cost: ",cost.train)
+```
+### Out-of-Sample Parameters
+```{r, echo=F, warning=F}
+#OOO Sample
+#Obtaining binary output using cut-off probability
+class.german.test.opt <- (pred.german.test>optimal.pcut)*1
+
+#Confusion matrix
+table(german.test$response, class.german.test.opt, dnn = c("True", "Predicted")) 
+MR.test <- mean(german.test$response!= class.german.test.opt)
+cost.test <- costfunc(obs = german.test$response, pred.p = pred.german.test, pcut = optimal.pcut)
+
+paste("In-sample misclassification rate: ",round(MR.test,2))
+paste("In-sample cost: ",cost.test)
+```
+
+## Classification Tree - CART
+For this data set, since the respondent variable _response_ is a binary variable, we build a classification tree, and observe the in-sample and out-of-sample misclassification rate, cost, ROC curve, and AUC.
+```{r, echo=F, warning=F}
+#Model fitting
+german.rpart <- rpart(response~., data = german.train, method = "class", 
+                      parms = list(loss=matrix(c(0,5,1,0), nrow = 2)))
+rpart.plot(german.rpart)
+```
+
+### In-sample parameters
+```{r, echo=F, warning=F}
+# In-Sample prediction
+german.rpart.train.pred <- predict(german.rpart, german.train, type = "class")
+german.rpart.train.prob <- predict(german.rpart,german.train, type="prob")
+
+#Confustion matrix
+table(german.train$response, german.rpart.train.pred, dnn=c("Truth","Predicted"))
+
+#Cost function
+cost <- function(r, pi){
+  weight1 = 5
+  weight0 = 1
+  c1 = (r==1)&(pi==0) 
+  c0 = (r==0)&(pi==1) 
+  return(mean(weight1*c1+weight0*c0))
+}
+#Cost calculation
+tree.train.cost <- cost(german.train$response,german.rpart.train.pred)
+
+#Misclassification Rate
+tree.train.MR <- mean(german.train$response!= german.rpart.train.pred)
+
+#ROC Curve
+pred <- prediction(german.rpart.train.prob[,2], german.train$response)
+perf <- performance(pred, "tpr", "fpr")
+#AUC
+tree.train.auc <- unlist(slot(performance(pred, "auc"), "y.values"))
+
+#Output results
+paste("In-sample misclassification rate: ",round(tree.train.MR,2))
+paste("In-sample cost: ",tree.train.cost)
+plot(perf, colorize=TRUE, main = paste("In-sample ROC Curve: AUC = ",round(tree.train.auc,2)))
+```
+
+### Out-of-sample parameters
+```{r, echo=F, warning=F}
+# Out-of-Sample prediction
+german.rpart.test.pred <- predict(german.rpart, german.test, type = "class")
+german.rpart.test.prob <- predict(german.rpart, german.test, type="prob")
+
+#Confustion matrix
+table(german.test$response, german.rpart.test.pred, dnn=c("Truth","Predicted"))
+
+#Cost calculation
+tree.test.cost = cost(german.test$response,german.rpart.test.prob) 
+
+#Misclassification Rate
+tree.test.MR <- mean(german.test$response!= german.rpart.test.prob)
+
+#ROC Curve
+pred <- prediction(german.rpart.test.prob[,2], german.test$response)
+perf <- performance(pred, "tpr", "fpr")
+#AUC
+tree.test.auc <- unlist(slot(performance(pred, "auc"), "y.values"))
+
+#Output results
+paste("Out-of-sample misclassification rate: ",round(tree.test.MR,2))
+paste("Out-of-sample cost: ",round(tree.test.cost,2))
+plot(perf, colorize=TRUE, main = paste("Out-of-sample ROC Curve: AUC = ",round(tree.test.auc,2)))
+```
+
+## Random Forest 
+Random Forest provides a better prediction than decision trees and logistic regression. For classification problems, it randomly selects _sqrt(n)_ out of _n_ available predictor variables for each split in each tree, thereby reducing  the overall variance of the aggregate. 
+
+'RandomForest' function does not support asymmetric cost function, and always uses the misclassification rate as the error. Also, it reflects the out-of-bag error rate, which is an unbiased estimate of the test set errorand a fairly reasonable estimate of future performance.
+
+From the confusion matrix as well as the plot of errors vs. number of trees, we note that the FNR is very high. For prediction purpose, we use the obtained predicted probability and then find optimal cut-off.
+```{r, echo=F, warning=F}
+#Model fitting
+german.rf <- randomForest(as.factor(response)~., data = german.train)
+german.rf
+
+#Confusion matrix
+CM = table(predict(german.rf), german.train$response)
+accuracy = (sum(diag(CM)))/sum(CM)
+paste("Accuracy: ",round(accuracy,4)*100,"%",sep="")
+
+#No. of trees vs. error
+plot(german.rf, lwd=rep(2, 3), main = "ntree vs. error")
+legend("right", legend = c("OOB Error", "FPR", "FNR"), lwd=rep(2, 3), lty = c(1,2,3), col = c("black", "red", "green"))
+```
+
+```{r, echo=F, warning=F}
+#Optimal cut-off probability
+
+german.rf.pred<- predict(german.rf, type = "prob")
+
+costfunc = function(obs, pred.p, pcut){
+    weight1 = 5   
+    weight0 = 1    
+    c1 = (obs==1)&(pred.p<pcut)    #FN
+    c0 = (obs==0)&(pred.p>=pcut)   #FP
+    cost = mean(weight1*c1 + weight0*c0)  #MR
+    return(cost)
+} 
+
+p.seq = seq(0.01, 0.5, 0.01)
+cost = rep(0, length(p.seq))  
+for(i in 1:length(p.seq)){ 
+    cost[i] = costfunc(obs = german.train$response, pred.p = german.rf.pred, pcut = p.seq[i])  
+}
+
+optimal.pcut = p.seq[which(cost==min(cost))][1]
+paste("Optimal cut-off probability:",optimal.pcut)
+plot(p.seq, cost)
+```
+
+### In-Sample parameters
+```{r, echo=F, warning=F}
+german.rf.pred.train <- predict(german.rf,type = "prob")[,2]
+german.rf.class.train <- (german.rf.pred.train>optimal.pcut)*1
+
+#Confusion Matrix
+table(german.train$response, german.rf.class.train, dnn = c("True", "Pred"))
+
+#Misclassification Rate
+rf.train.MR <- mean(german.train$response!= german.rf.class.train)
+
+#ROC Curve
+pred <- prediction(german.rf.pred[,2], german.train$response)
+perf <- performance(pred, "tpr", "fpr")
+#AUC
+rf.train.auc <- unlist(slot(performance(pred, "auc"), "y.values"))
+
+#Output results
+paste("In-sample misclassification rate: ",round(rf.train.MR,2))
+plot(perf, colorize=TRUE, main = paste("In-sample ROC Curve: AUC = ",round(rf.train.auc,2)))
+```
+
+### Out-of-Sample parameters
+```{r, echo=F, warning=F}
+german.rf.pred.test <- predict(german.rf, german.test, type = "prob")[,2]
+
+# Optimal pcut
+optimal.pcut= p.seq[which(cost==min(cost))]
+german.rf.class.test <- (german.rf.pred.test>optimal.pcut)*1
+
+#Confusion Matrix
+table(german.test$response, german.rf.class.test, dnn = c("True", "Pred"))
+
+#Misclassification Rate
+rf.test.MR <- mean(german.train$response!= german.rf.class.test)
+
+#ROC Curve, AUC
+pred <- prediction(german.rf.pred.test, german.test$response)
+perf <- performance(pred, "tpr", "fpr")
+#AUC
+rf.test.auc<-unlist(slot(performance(pred, "auc"), "y.values"))
+
+#Output results
+paste("Out-of-sample misclassification rate: ",round(rf.test.MR,2))
+plot(perf, colorize=TRUE, main = paste("Out-of-sample ROC Curve: AUC = ",round(rf.train.auc,2)))
+```
+
+## Boosting
+Boosting is a slow learning method which builds a large number of small trees where responses are the residuals of previous trees. There are many tuning parameters that can be controlled. `n.trees` is the number of small trees we fit. Too many trees may lead to overfitting. `shrinkage` is another tuning parameter that controls how much contribution each tree makes. `interaction.depth` is how many splits are in each tree. All these tuning parameters can be chosen from cross-validation. 
+The fitted boosted tree also gives the relation between response and each predictor.
+```{r, echo=F, warning=F}
+german.train$response = as.numeric(german.train$response)
+
+# Model fitting
+german.boost <- gbm(response~., data = german.train, distribution = "bernoulli",n.trees = 10000, shrinkage = 0.01, interaction.depth = 8)
+```
+
+### In-sample parameters
+```{r, echo=F, warning=F}
+# Testing AUC
+pred.german.boost = predict(german.boost, newdata=german.train, type = "response", n.trees=100)
+pred <- prediction(pred.german.boost, german.train$response)
+perf <- performance(pred, "tpr", "fpr")
+#AUC
+boost.train.auc <- unlist(slot(performance(pred, "auc"), "y.values"))
+plot(perf, colorize=TRUE, main = paste("In-sample ROC Curve: AUC = ",round(boost.train.auc,2)))
+
+#Misclassification Rate
+boost.test.MR <- mean(german.train$response!= pred.german.boost)
+paste("In-sample misclassification rate: ",round(boost.test.MR,2))
+```
+
+### Out-of-sample parameters
+```{r, echo=F, warning=F}
+pred.german.boost.test= predict(german.boost, newdata = german.test, type = "response", n.trees=100)
+pred <- prediction(pred.german.boost.test,german.test$response)
+perf <- performance(pred, "tpr", "fpr")
+#AUC
+boost.test.auc <- unlist(slot(performance(pred, "auc"), "y.values"))
+plot(perf, colorize=TRUE, main = paste("Out-of-sample ROC Curve: AUC = ",round(boost.test.auc,2)))
+```
+
+## General Additive Model
+For the initial model, we apply the smooth function only to variables duration, age, and amount, and convert response to factor.
+We find that in this initial model, none of the factors of variables 'sex', 'present_resid', 'n_credits', 'job', 'n_people'  are significant, and variable 'duration' has an edf=1. Even variables that have edf>1 have a high-variance, almost-linear relationship with the resultant output. We adjust these variables in the final model before performing prediction. Additionally, the R-squared factor indicates that this model is not a very suitable fit.
+```{r, echo=F, warning=F}
+#Creating a formula for a model with a large number of variables
+gam_formula <- as.formula(paste("as.factor(response)~chk_acct+s(duration)+credit_his+", paste(colnames(german.train)[4:20], collapse= "+")))
+
+#Model fitting
+german.gam <- gam(as.factor(response)~ chk_acct+ s(duration)+ credit_his+ purpose+ s(amount)+ saving_acct+ present_emp+ installment_rate+ sex+ other_debtor+ present_resid+ property+ s(age)+ other_install+ housing+ n_credits+ job+ n_people+ telephone+ foreign, 
+                  family = binomial, data = german.train)
+
+summary(german.gam)
+plot(german.gam, shade=TRUE,seWithMean=TRUE,scale=0, pages = 1)
+```
+
+Refitting the above model by the newly found relationship, with only amount and age as the spline. We note the AIC and BIC of the final model.
+```{r, echo=F, warning=F}
+#Model fitting
+german.gam <- gam(as.factor(response)~ chk_acct+ duration+ credit_his+ purpose+ s(amount)+ saving_acct+ present_emp+ installment_rate+ other_debtor+ property+ s(age)+ other_install+ housing+ telephone+ foreign, 
+                  family = binomial, data = german.train)
+
+summary(german.gam)
+
+paste("GAM: AIC = ", round(AIC(german.gam),2))
+paste("GAM: BIC = ", round(BIC(german.gam),2))
+```
+
+We now try to find the optimal cut-off probability using grid search from pcut = 0.01 to pcut = 0.99 with the objective of minimizing overall cost in the training set. The asymmetric cost function is used, assuming that giving out a loan to a defaulter could cost 10 time as much as rejecting application from someone who can pay.
+
+```{r, echo=F, warning=F, message=F}
+searchgrid = seq(0.01, 0.20, 0.01)
+result.gam = cbind(searchgrid, NA)
+cost1 <- function(r, pi){
+  weight1 = 5
+  weight0 = 1
+  c1 = (r==1)&(pi<pcut) #FN
+  c0 = (r==0)&(pi>pcut) #FP
+  return(mean(weight1*c1+weight0*c0))
+}
+
+for(i in 1:length(searchgrid))
+{
+  pcut <- result.gam[i,1]
+  result.gam[i,2] <- cost1(german.train$response, predict(german.gam,type="response"))
+}
+
+index.min <- which.min(result.gam[,2])
+pcut_gam = result.gam[index.min,1]
+
+#Output results
+paste("Optimal cut-off probability = ", round(pcut_gam,2))
+paste("Minimized cost at optimal cut-off = ", round(result.gam[index.min,2],2))
+plot(result.gam, ylab="Cost in Training Set")
+```
+
+```{r, include==F}
+germancost <- function(observed, predicted){
+  weight1 = 5
+  weight0 = 1
+  c1 = (observed==1)&(predicted == 0) #FN
+  c0 = (observed==0)&(predicted == 1) #FP
+  return(mean(weight1*c1+weight0*c0))
+}
+```
+
+### In-sample parameters
+```{r, echo=F,warning=F}
+#In sample prediction
+prob.gam.train <- predict(german.gam, newdata=german.train, type="response")
+pred.gam.train <- (prob.gam.train >= pcut_gam)*1
+
+#Confusion Matrix
+table(german.train$response,pred.gam.train,dnn=c("Observed","Predicted"))
+
+#Misclassification Rate
+gam.train.MR <- mean(german.train$response != pred.gam.train)
+
+#Cost
+gam.train.cost <- germancost(german.test$response,pred.gam.train)
+
+#Output results
+paste("GAM: In-sample MR: ", round(gam.train.MR,2))
+paste("GAM: In-sample cost: ", round(gam.train.cost,2))
+```
+
+### Out-of-sample parameters
+```{r, echo=F, warning=F}
+#OOO sample prediction
+prob.gam.test <- predict(german.gam, newdata=german.test, type="response")
+pred.gam.test<-(prob.gam.test >= pcut_gam)*1
+
+#Confusion Matrix
+table(german.test$response,pred.gam.test,dnn=c("Observed","Predicted"))
+
+#Misclassification Rate
+gam.test.MR <- mean(german.test$response != pred.gam.test)
+
+#Cost
+gam.test.cost <- germancost(german.test$response,pred.gam.test)
+
+#Output results
+paste("GAM: Out-of-sample MR: ", round(gam.test.MR,2))
+paste("GAM: Out-of-sample cost: ", round(gam.test.cost,2))
+```
+
+## Neural Net
+We model a neural network with a single hidden layer with 3 nodes, and set the maximum number of iterations to 500. We also input a decay parameter of 0.001.
+```{r, echo=F, warning=F}
+#Model fitting
+german.nnet <- nnet(formula = as.factor(german.train$response)~., data=german.train, size=3, maxit=500, decay=0.001)
+```
+
+### In-sample parameters
+```{r, echo=F, warning=F}
+#In-sample prediction
+prob.nnet <- predict(german.nnet, german.train, type = "class")
+pred.nnet = as.numeric(prob.nnet > 0.08)
+
+#Confusion Matrix
+table(german.train$response,pred.nnet, dnn=c("Observed","Predicted"))
+
+nn.train.MR <- mean(ifelse(german.test$response != pred.nnet, 1, 0))
+nn.train.cost <- germancost(german.test$response, pred.nnet)
+
+#Output results
+paste("Neural Networks: In-sample Misclassification rate = ", round(nn.train.MR,2))
+paste("Neural Networks: In-sample cost = ",round(nn.train.cost,2))
+```
+
+### Out-of-sample parameters
+```{r, echo=F, warning=F}
+#OOO sample prediction
+prob.nnet <- predict(german.nnet, german.test, type = "class")
+pred.nnet = as.numeric(prob.nnet > 0.08)
+
+#Confusion Matrix
+table(german.test$response,pred.nnet, dnn=c("Observed","Predicted"))
+
+nn.test.MR <- mean(ifelse(german.test$response != pred.nnet, 1, 0))
+nn.test.cost <- germancost(german.test$response, pred.nnet)
+
+#Output results
+paste("Neural Networks: Out-of-sample Misclassification rate = ", round(nn.test.MR,2))
+paste("Neural Networks: Out-of-sample cost = ",round(nn.test.cost,2))
+```
